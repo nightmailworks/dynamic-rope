@@ -1,0 +1,1242 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Dynamic Rope: how it works</title>
+  <link rel="stylesheet" href="css/page.css">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><circle cx='8' cy='8' r='5' fill='none' stroke='%23996EFF' stroke-width='2'/></svg>">
+</head>
+<body>
+
+<!-- ── Fixed progress rail ─────────────────────────────────────────────── -->
+<nav id="progress-rail" aria-label="Section navigation">
+  <a class="rail-item" href="#s-synopsis" data-section="s-synopsis" aria-label="Synopsis">
+    <span class="rail-dot"></span>
+    <span class="rail-label">Synopsis</span>
+  </a>
+  <a class="rail-item" href="#s-naive" data-section="s-naive" aria-label="Naive approach">
+    <span class="rail-dot"></span>
+    <span class="rail-label">Naive</span>
+  </a>
+  <a class="rail-item" href="#s-winding" data-section="s-winding" aria-label="Winding">
+    <span class="rail-dot"></span>
+    <span class="rail-label">Winding</span>
+  </a>
+  <a class="rail-item" href="#s-solve" data-section="s-solve" aria-label="Path solver">
+    <span class="rail-dot"></span>
+    <span class="rail-label">Solve</span>
+  </a>
+  <a class="rail-item" href="#s-solve-release" data-section="s-solve-release" aria-label="Release gates">
+    <span class="rail-dot"></span>
+    <span class="rail-label">Release</span>
+  </a>
+  <a class="rail-item" href="#s-simulate" data-section="s-simulate" aria-label="Simulation">
+    <span class="rail-dot"></span>
+    <span class="rail-label">Simulate</span>
+  </a>
+  <a class="rail-item" href="#s-stroke" data-section="s-stroke" aria-label="Stroke rendering">
+    <span class="rail-dot"></span>
+    <span class="rail-label">Stroke</span>
+  </a>
+  <a class="rail-item" href="#s-synthesis" data-section="s-synthesis" aria-label="Synthesis">
+    <span class="rail-dot"></span>
+    <span class="rail-label">Synthesis</span>
+  </a>
+</nav>
+
+<!-- ── Page header ─────────────────────────────────────────────────────── -->
+<header id="page-header">
+  <p class="eyebrow">solve · simulate · stroke</p>
+  <h1>Dynamic Rope</h1>
+  <p class="hero-sub">How a real-time rope wraps obstacles, goes slack between
+    them, and draws itself as a smooth ribbon.</p>
+</header>
+
+<!-- ── Hero banner ─────────────────────────────────────────────────────── -->
+<figure class="hero-banner">
+  <img src="images/hero.webp" alt="Three-quarter view of a glowing violet rope threading between birch trunks in a forest, a hooded player at center">
+  <figcaption>A rope catches on trees and goes slack between them.</figcaption>
+</figure>
+
+<!-- ── Sections ────────────────────────────────────────────────────────── -->
+<main id="content">
+
+  <!-- 1 · Synopsis -->
+  <section id="s-synopsis" class="sec">
+    <div class="prose">
+      <h2>Synopsis</h2>
+
+      <p>Wrapping rope sounds simple: run a particle simulation, push each particle
+         out of any solid it penetrates, and <a href="https://www.youtube.com/watch?v=Qs8Gohi1e04" target="_blank" rel="noopener" class="softlink">stroke</a> the chain. The simulation is the
+         easy part. The trouble is that a particle rope resolves every contact through
+         competing forces. A push-out ejects a penetrating particle to the surface, and
+         the distance link to its neighbour hauls it back, often straight back inside.
+         Neither force carries any memory that a contact was already settled, so they
+         never agree and the rope never comes to rest. On a frame where it hasn't, the
+         rope can slip onto the wrong side of an obstacle, and nothing in the simulation
+         knows it was ever meant to be anywhere else. The naive rope is
+         <strong>all prevention and no correction</strong>.</p>
+
+      <p>The fix is to stop asking the particle rope to own topology. A taut-path
+         solver owns side, length, and release; the slack rope only adds shape.</p>
+
+      <p>Requirements:</p>
+      <ul>
+        <li><strong>Wrap, don't clip.</strong> Go <em>around</em> the obstacle, on the
+            correct side, with no frame where the rope crosses solid geometry.</li>
+        <li><strong>Always know the leash length.</strong> The rope pays from a finite
+            spool, so you need the exact deployed length every frame, to stop the
+            player at the limit, or to flash a "taut" warning.</li>
+        <li><strong>Release without teleporting.</strong> When the player doubles back the
+            rope must unwind, never jump across the obstacle to the wrong side.</li>
+        <li><strong>Stay cheap.</strong> Every frame, every rope, never the bottleneck.</li>
+      </ul>
+
+      <p>Terms:</p>
+      <dl class="glossary">
+        <dt>Topology</dt>
+        <dd><em>Which</em> obstacles the rope goes around, and on <em>which side</em>:
+            not the exact shape, just the routing.</dd>
+
+        <dt>Taut path</dt>
+        <dd>The shortest route from the spool end to the player end for a fixed topology:
+            straight chords between wraps, and a tangent→arc→tangent around each obstacle.
+            Its length is the <em>taut length</em>: the least rope that reaches the player
+            with those wraps in place.</dd>
+
+        <dt>Winding</dt>
+        <dd>How many times, and which way, the rope has gone around an obstacle: a signed
+            turn count carried frame to frame. It is the source of truth for which side the
+            rope is on and how many laps it has made.</dd>
+
+        <dt>Wrap / release</dt>
+        <dd>A wrap is the rope catching on an obstacle as the player sweeps around it
+            (winding grows); release is it letting go as the player reverses (winding
+            unwinds and the straight path is clear again).</dd>
+
+        <dt><span class="term"
+              data-def="A function that returns the signed distance from any point to the nearest surface boundary (negative = inside, positive = outside)."
+              data-href="https://en.wikipedia.org/wiki/Signed_distance_function">SDF</span></dt>
+        <dd>Signed distance field: a function giving the distance from any pixel to a
+            shape, used to draw a crisp anti-aliased stroke without tessellating a mesh.</dd>
+      </dl>
+
+      <p>Roadmap: <strong>Solve → Simulate → Stroke</strong>. First, the failure that
+         motivates the split.</p>
+    </div>
+    <div class="fig">
+      <div class="demo-root" style="min-height:320px;"></div>
+    </div>
+  </section>
+
+  <!-- 2 · Naive -->
+  <section id="s-naive" class="sec sec-fix">
+    <div class="prose">
+      <h2>Why a naive rope fails</h2>
+
+      <p>The naive rope: a chain of point masses integrated with
+         <strong><span class="term"
+           data-def="A numerical integration method that computes position from acceleration without storing velocity, giving stable oscillation in physics simulations."
+           data-href="https://en.wikipedia.org/wiki/Verlet_integration">Verlet</span></strong>
+         (store each particle's current and previous position,
+         skip explicit velocity), a one-sided link between neighbours so the rope can
+         go slack but never stretch, and a push-out that shoves any particle sitting
+         inside an obstacle back to its rim. Two loops, about fifty lines.</p>
+
+      <p>It fails when anything slides. On a round obstacle, something is always
+         sliding. There is no model of a <em>good</em> state to pull back to, so one
+         missed prevention step becomes a topology error.</p>
+    </div>
+  </section>
+
+  <!-- 2a · Failure 1 -->
+  <section id="s-naive-1" class="sec">
+    <div class="prose">
+      <h3>Failure 1: jitter that never settles</h3>
+      <p>Each iteration: push-out shoves a penetrating particle to the rim.
+         The distance-link to its neighbour immediately pulls it back, often
+         back inside. The two constraints fight without memory of "this contact
+         is resolved." The rope buzzes against the obstacle forever.</p>
+
+      <p>The chart plots the largest correction any particle takes on each solver
+         iteration, for a ring resting against a disc. A solver settling into a stable
+         state drives this toward zero, with less to fix on every pass. This one does
+         not: push-out moves a particle to the rim, the link pulls it back, and the
+         next pass has the same amount to undo. The correction holds roughly flat
+         across the run rather than decaying, and that is the buzz you see in the rope.
+         (The plot prints the ratio of the last quarter's average correction to the
+         first quarter's; near 1 means no decay.)</p>
+    </div>
+    <div class="fig">
+      <div class="demo-root" data-pose="jitter" style="min-height:240px;"></div>
+    </div>
+  </section>
+
+  <!-- 2b · Naive failure 2 + 3 (same section, continuation) -->
+  <section id="s-naive-2" class="sec">
+    <div class="prose">
+      <h3>Failure 2: a snapshot cannot tell which side</h3>
+      <p>A pure particle sim must ask "is this particle left or right of the
+         obstacle?" from its current position alone. The answer is a sign test,
+         but sign tests are stateless. A single timestep that is too coarse lets
+         a particle <em>tunnel</em> through the disc: it was above before the
+         step, below after, and the sim never saw it cross.</p>
+
+      <p>One coarse step (2.5× the obstacle radius) flips the side-readout from
+         <code>+1 (above)</code> to <code>−1 (below)</code>, while the true
+         topology never changed. Shrinking a fixed timestep only moves the failure
+         threshold; robust handling needs swept/continuous collision or a persistent
+         winding count.</p>
+
+      <div class="key-insight">
+        A finer timestep does not fix this. Side has to be tracked as an
+        <strong>integrated, persistent</strong> quantity (winding), carried across
+        frames rather than re-read from a snapshot.
+      </div>
+    </div>
+    <div class="fig">
+      <div class="demo-root" data-pose="side-flip" style="min-height:240px;"></div>
+    </div>
+  </section>
+
+  <!-- 2c · Naive failure 3 -->
+  <section id="s-naive-3" class="sec">
+    <div class="prose">
+      <h3>Failure 3: push-out cannot count laps</h3>
+      <p>A penetration test only knows "this particle is inside right now."
+         It cannot tell how many times the rope has gone around the obstacle.
+         When the rope is double-wrapped (two full loops, with every particle
+         <em>outside</em> the disc), push-out reads <strong>zero</strong>
+         penetrations, so it finds nothing to correct.</p>
+
+      <p>Without a lap count, release can't know how far the player must retrace
+         before the rope should let go. Let go too early and the rope snaps straight
+         through the solid in one frame, teleporting to the wrong side.</p>
+
+      <p>A 48-particle double wrap gives push-out lap count <code>0</code>;
+         integrated winding gives <code>≈ 2.00 turns</code>.</p>
+    </div>
+    <div class="fig">
+      <div class="demo-root" data-pose="laps" style="min-height:240px;"></div>
+    </div>
+  </section>
+
+  <!-- 2d · The fix: the turning point, resolving all three failures -->
+  <section id="s-fix" class="sec sec-fix">
+    <div class="prose">
+      <h2>The fix: two ropes</h2>
+      <p>All three failures are one failure. Jitter, the side flip, the blind lap count
+         are each a point where prevention slipped and the simulation had no correct
+         state to fall back to. Topology, meaning which side and how many laps, is
+         history, and a snapshot of where the particles sit right now cannot recover it.</p>
+      <p>The remedy is to run two ropes. A <em>solver</em> owns the topology: which
+         obstacles are wrapped, on which side, how far, and when to let go, computed
+         exactly and carried frame to frame rather than simulated. The physics rope still
+         carries slack and bows, but it is now <strong>subordinate</strong>: free to take
+         whatever shape it likes, never free to leave the side the solver chose. The
+         renderer turns the result into a clean stroke. That split,
+         <strong>Solve → Simulate → Stroke</strong>, is the design the rest of this page
+         builds.</p>
+    </div>
+  </section>
+
+  <!-- 3 · Winding (half-turn) -->
+  <section id="s-winding" class="sec sec-fix">
+    <div class="prose">
+      <h2>Winding: a path has no side, a loop does</h2>
+
+      <p>Before the solver, get winding right. Every decision the solver makes (which
+         side, how many laps, when to release) is a winding read.</p>
+    </div>
+  </section>
+
+  <!-- 3a · Winding (defining + half-turn) -->
+  <section id="s-winding-def" class="sec">
+    <div class="prose">
+      <h3>Defining the <span class="term"
+          data-def="An integer counting how many times a closed curve winds around a given point; used to test point-in-polygon containment."
+          data-href="https://en.wikipedia.org/wiki/Winding_number">winding number</span></h3>
+      <p>Stand at the center of an obstacle and watch the rope pass by. Each time the
+         rope makes a full counter-clockwise circuit around you, the winding number
+         increases by 1. Each clockwise circuit decreases it by 1. Partial arcs
+         contribute proportionally. Formally, the winding is the total signed angle
+         swept by consecutive vertex-to-vertex rays (a signed angle in radians)
+         which the code divides by 2π to convert to turns:</p>
+      <pre><code>windingTurns = windingAbout(pts, center) / (2*PI)
+  where windingAbout returns signed radians:
+  Σ atan2(cross(vᵢ, vᵢ₊₁), dot(vᵢ, vᵢ₊₁))
+  where vᵢ = pts[i] − center</code></pre>
+      <p>In the <strong>half-turn</strong> pose (≈ 0.5 turns), the gold
+         rays fan out from the obstacle center to each rope vertex; as you move along the
+         rope the rays rotate and the running tally climbs.</p>
+    </div>
+    <div class="fig">
+      <div class="demo-root" data-pose="half" style="min-height:300px;"></div>
+    </div>
+  </section>
+
+  <!-- 3b · Winding (full-turn) -->
+  <section id="s-winding-2" class="sec">
+    <div class="prose">
+      <h3>Full-turn example</h3>
+      <p>The <strong>full-turn</strong> pose (≈ 1.0 turns) shows the player routed all
+         the way around the obstacle and back. The winding readout doubles: a visibly
+         distinct number that the solver can act on to distinguish a half turn from a full one.</p>
+    </div>
+    <div class="fig">
+      <div class="demo-root" data-pose="full" style="min-height:300px;"></div>
+    </div>
+  </section>
+
+  <!-- 3c · Winding (chord false-positives) -->
+  <section id="s-winding-3" class="sec">
+    <div class="prose">
+      <h3>Why an open path has no side, only a closed loop does</h3>
+      <p>"Which side of the obstacle is the rope on?" sounds answerable from the rope
+         alone, but it is not. A single open path from spool to player has <em>no
+         side</em>: slide any segment left or right and the rope is still the same path
+         from spool to player. There is no fact of the matter encoded in the strand itself.</p>
+      <p>A side label isn't absolute for an open rope. To compare two routes, close the
+         rope against a chosen reference path and measure that loop's winding. The rope
+         from spool to player (going forward) and the straight <em>chord</em> (the direct
+         straight line) from player back to spool form such a loop. Its winding number around the obstacle center is the
+         exact, unambiguous answer: <em>0 = same side as the chord, ±1 = one full lap
+         apart, ±2 = two laps, etc.</em></p>
+
+      <div class="key-insight">
+        Side and lap count are only well-defined for a closed loop, not for an open
+        strand. That is the idea; in practice the solver
+        never builds the closed loop explicitly. Instead each wrap carries a
+        <strong>signed contact span</strong> that it accumulates continuously, frame to
+        frame, from the relative rotation of its two legs (<a href="#s-solve">§Solve</a>).
+        This works because each frame's change in that span equals the winding of the closed
+        loop formed by this frame's path and the previous frame's, so accumulating the span
+        <em>is</em> the closed-loop story, without ever building the closed loop. The span
+        keeps adding past a full revolution, so multi-lap winding is tracked directly, and the
+        <em>arc renderer</em> draws it back out as a coil, snapping to the nearest whole lap
+        (exact through about one turn, approximate beyond).
+      </div>
+
+      <h3>Why naive per-bead chords give false positives</h3>
+      <p>Tempting shortcut: draw a chord from each rope vertex to a reference line,
+         then flag any chord crossing the disc. The problem: <em>whether that arbitrary line clips the disc says
+         nothing reliable about side.</em></p>
+      <p>The <strong>chord-falsepos</strong> pose shows this exactly. The rope (purple)
+         arcs over the top of the obstacle to reach the player. The dashed grey line is
+         the naive direct chord from spool to player. The <strong>closed loop</strong>
+         formed by the rope going forward over the top and the direct chord going back
+         underneath winds exactly <strong>0 turns</strong> around the obstacle: the
+         rope is topologically fine. Yet the per-bead chords (connecting each rope vertex
+         to its corresponding point on the direct chord) cross the disc and light up red.
+         A naive corrector acting on those red flags would needlessly drag the rope
+         through the obstacle, producing the exact jitter the solver is designed to
+         prevent.</p>
+      <p>With a valid obstacle-avoiding reference path, the closed-loop winding avoids
+         these per-bead-chord false positives because it uses only the rope and the
+         reference themselves: no arbitrary chord is introduced.</p>
+    </div>
+    <div class="fig">
+      <div class="demo-root" data-pose="chord-falsepos" style="min-height:300px;"></div>
+    </div>
+  </section>
+
+  <!-- 4 · Solve: wrap construction + taut length -->
+  <section id="s-solve" class="sec sec-fix">
+    <div class="prose">
+      <h2>Solve: wrapping the obstacle</h2>
+
+      <p>The solver tracks winding <em>incrementally</em>, never by re-deriving the
+         route from scratch. Topology is history-dependent, so the path is built up
+         move by move and edited only when an obstacle is caught or released.</p>
+    </div>
+  </section>
+
+  <!-- 4a · Solve: the update loop + wrap construction -->
+  <section id="s-solve-build" class="sec">
+    <div class="prose">
+      <h3><code>update(playerPos, obstacles)</code></h3>
+      <p>A fast move could tunnel past a circle between frames, so the update first
+         <strong>substeps the endpoint's motion</strong> into pieces no larger than half the
+         smallest scene feature (here, half the smallest obstacle radius), and keeps the
+         endpoint in free space (projected out of any disc it lands in). Each substep:</p>
+      <ol>
+        <li><strong>Accumulate the winding.</strong> For every active wrap, add this
+            substep's change in <em>signed contact span</em>: how its two rope legs rotated
+            relative to each other (Step&nbsp;2). Done <em>before</em> any topology edit, so
+            the delta reflects real player motion.</li>
+        <li><strong>Converge the topology.</strong> Insert a wrap wherever a leg now first
+            crosses an un-wrapped obstacle; release any wrap that has unwound and whose
+            straight chord is clear. Repeat until nothing changes; a single move can catch
+            one obstacle and free another.</li>
+        <li><strong>Rebase.</strong> After any insert or release, reset each wrap's stored
+            leg angles to the current geometry <em>without</em> changing its accumulated span,
+            so editing the topology never registers as a phantom turn of winding.</li>
+      </ol>
+
+      <h3>Step 1: the two tangent lines</h3>
+      <p>From the previous node (spool or prior wrap exit) to the obstacle disc, there are
+         exactly two straight lines that graze the disc without crossing it: the
+         <strong><span class="term"
+           data-def="A line that touches a circle at exactly one point; an external tangent touches two circles without crossing between them."
+           data-href="https://en.wikipedia.org/wiki/Tangent_lines_to_circles">external tangents</span></strong>
+         (each tangent line touches the circle at exactly one point without cutting through it). The angle from the point to each
+         tangent contact is:</p>
+      <pre><code>offset = acos(r / |d|)</code></pre>
+      <p>where <code>r</code> is the disc radius and <code>|d|</code> is the distance from
+         the point to the disc center. The two tangent contacts sit at angles
+         <code>atan2(d) ± offset</code> on the circle. The same construction runs from
+         the next node (player or next wrap entry) to get two tangent contacts on the exit
+         side.</p>
+
+      <p>Obstacles are drawn as circles throughout because the tangent points and arc
+         length come out as clean formulas. Nothing downstream depends on the shape:
+         the same machinery wraps any convex hull (the tangent contact becomes a support
+         vertex) or a boundary loop, see <a href="#s-synthesis">§Synthesis</a>. The
+         circle is the special case that keeps the math readable, not a restriction.</p>
+
+      <h3>Step 2: which side, and the entry/exit tangents</h3>
+      <p>When a leg first crosses an obstacle, the new wrap takes the side the obstacle was
+         on <em>as the player crossed it</em>: the sign of <code>cross(chord, center −
+         start)</code> using the player's position <em>before</em> the substep, so a fast step
+         can't land the post-move chord on the wrong side and pick backwards. Side in hand,
+         the entry and exit contacts are the two <strong>deterministic</strong> tangents for
+         that side: the entry is the side's tangent toward the previous node, the exit the
+         opposite-side tangent toward the next. No per-frame search over candidates, so the
+         route can't flicker between equally-scored options, and the leg meets the arc at
+         exactly the tangent point (no gap).</p>
+
+      <h3>Tracking the winding: the accumulated signed span</h3>
+      <p>Each wrap stores one number: its <strong>signed contact span</strong>, the running
+         total of how far the rope has wound around that obstacle (CCW +, CW −). Each substep
+         it grows by the relative rotation of the two legs:</p>
+      <pre><code>span += Δ(exit-leg angle) − Δ(entry-leg angle)</code></pre>
+      <p>One leg moving (the player) winds the wrap; both rotating together (a rigid pan)
+         does not. This span <em>is</em> the winding memory: it can grow past a full
+         revolution (genuine multi-lap), and a wrap is released only once it has returned
+         toward zero <em>and</em> the straight chord between its neighbours is clear
+         <em>and</em> the release wouldn't flip the rope to the obstacle's far side. Because
+         the span is accumulated rather than re-measured each frame, the solver stays on the
+         consistent side as the player moves instead of snapping to whatever route looks
+         shortest this instant.</p>
+      <p>(The <a href="#s-winding-3">§Winding</a> point still holds: the span tracks
+         multi-lap winding directly, and the <em>arc renderer</em> draws it as a coil,
+         snapped to the nearest whole lap, so exact through about one turn.)</p>
+
+      <h3>Step 3: the arc</h3>
+      <p>The winning entry and exit contact angles define an arc on the disc. The rope
+         polyline is assembled as:</p>
+      <pre><code>[spool, entry, …arc samples…, exit, player]</code></pre>
+      <p>The arc samples are taken at the same <code>(angle, radius, center)</code>
+         parametrization as the entry/exit points, so the end of the incoming leg and
+         the start of the arc are <em>the same point by construction</em>, no gap.</p>
+
+      <h3>Taut length: why the arc length matters</h3>
+      <p>The total length of this polyline (<strong>leg₁ + arc + leg₂</strong>) is
+         the <strong>taut length</strong>: the minimum rope needed to reach the player
+         with this particular wrap. It is <em>not</em> the straight-line distance from
+         spool to player; a wrap always adds the arc to the bill. Arc length is computed
+         analytically as <code>radius · |span|</code> (not by summing chord samples)
+         so the arc length is analytic, not estimated from samples.</p>
+
+      <p>A real tether pays from a <strong>finite spool</strong>. The solver compares taut
+         length against rope paid out to know:</p>
+      <ul>
+        <li>Whether the player can move further (taut length &lt; deployed → slack remains).</li>
+        <li>When to stop the player or pull the rope taut (taut length = deployed → leash at limit).</li>
+        <li>How much slack the rope carries (slack = deployed − taut, the rope paid out minus the taut path).</li>
+      </ul>
+
+      <p>The API surface for this is <code>solver.tautLength</code>, a getter on
+         <code>PathSolver</code> that returns the sum of straight-leg lengths plus each
+         wrap's arc length (<code>radius · |span|</code>), exact through about one turn (the
+         multi-lap arc rides the nearest-lap span; see <a href="#s-winding-3">§Winding</a>). Read
+         it after every <code>solver.update()</code> call alongside <code>solver.nodes</code>.</p>
+
+      <div class="key-insight">
+        The demo shows the three labelled components (leg₁, arc, leg₂) and their
+        sum as the taut length. A leash bar tracks how much of the paid-out spool is
+        consumed. Drag the player outward until the taut length reaches the paid-out
+        amount; the leash bar trips (turns red) <strong>at the limit</strong>.
+      </div>
+    </div>
+    <div class="fig">
+      <div class="demo-root" style="min-height:340px;"></div>
+    </div>
+  </section>
+
+  <!-- 4b · Solve: release gate 1 (held) -->
+  <section id="s-solve-release" class="sec sec-fix">
+    <div class="prose">
+      <h2>Solve: the three gates that release a wrap</h2>
+
+      <p>Forming a wrap is only half the job. The solver also has to know
+         <em>when to let go</em>, and getting that wrong produces the subtlest
+         failure in the system: the rope snapping silently through solid geometry
+         in a single frame.</p>
+
+      <p>The solver enforces <strong>three independent conditions</strong> before
+         releasing a wrap. All three must pass simultaneously; any one blocking is
+         enough to hold the wrap.</p>
+    </div>
+  </section>
+
+  <!-- 4b · Gate 1 (held) -->
+  <section id="s-solve-release-1" class="sec">
+    <div class="prose">
+      <h3>Gate 1, unwound: the winding has retraced to a graze</h3>
+      <p>Each wrap carries a <strong>signed winding</strong>: how far the rope has turned around
+         the obstacle, accumulated as the player moves (positive one way, negative the other, and
+         growing past a full turn for a multi-lap wrap). This is the quantity the gate watches,
+         not the rendered contact arc. As the player wound, the winding grew; as they reverse, it
+         shrinks back toward zero. The wrap releases once the winding has retraced to a graze: for a
+         counter-clockwise wrap, <code>winding ≤ +RELEASE_ANGLE</code>; for a clockwise wrap,
+         <code>winding ≥ −RELEASE_ANGLE</code> (≈ 8.6°).</p>
+
+      <p>The gate is deliberately <em>signed</em>, not <code>|winding|</code>. A
+         <code>|winding|</code> test looks safer, but it would keep holding a wrap that unwound past
+         the graze and began winding the <em>other</em> way, exactly the case that should release
+         and re-form on the new side. The signed winding lets go the moment the original wrap is
+         spent.</p>
+
+      <p>The rope is still well wound: the winding is far from the threshold, so gate 1 blocks
+         release.</p>
+    </div>
+    <div class="fig">
+      <div class="demo-root" data-pose="held" style="min-height:300px;"></div>
+    </div>
+  </section>
+
+  <!-- 4c · Solve: release gate 2 (released-clean) -->
+  <section id="s-solve-release-2" class="sec">
+    <div class="prose">
+      <h3>Gate 2, chord clear: straight path does not hit the obstacle</h3>
+      <p>Even after unwinding, the straight chord from the previous node to the next
+         node might still clip the disc, for example, if the rope approaches the
+         obstacle nearly tangentially. Attempting to release in that case would
+         immediately re-trigger a wrap detect on the very same frame. Gate 2 prevents
+         the bounce: if the chord hits the disc, keep the wrap.</p>
+
+      <p>Fully unwound, chord clear: all three gates pass, and the rope collapses to
+         a straight chord.</p>
+    </div>
+    <div class="fig">
+      <div class="demo-root" data-pose="released-clean" style="min-height:300px;"></div>
+    </div>
+  </section>
+
+  <!-- 4d · Solve: release gate 3 (teleport-bug) -->
+  <section id="s-solve-release-3" class="sec">
+    <div class="prose">
+      <h3>Gate 3, anti-teleport side check</h3>
+      <p>The failure case:</p>
+
+      <ol>
+        <li>The rope winds <strong>over the top</strong> of the obstacle. The
+            solver stores the wrap's <em>side</em>, say, left of the chord.</li>
+        <li>The player moves back. The winding shrinks to near zero (gate 1 passes).</li>
+        <li>The player ends up on the <strong>far side</strong> of the obstacle from
+            the spool, so the chord now wants to cross from left-of-obstacle to
+            right-of-obstacle: the opposite side from where the rope was wound.</li>
+        <li>The chord does <em>not</em> clip the disc boundary (gate 2 passes: the
+            chord is geometrically clear). Gates 1 and 2 are both green.</li>
+        <li>Without gate 3, the solver releases the wrap and draws that chord,
+            snapping the rope across the obstacle to the wrong side in a single frame.
+            The chord never passes through solid, but the rope's whole route jumps
+            from one side of the disc to the other instantly.</li>
+      </ol>
+
+      <p>Gate 2 (chord-clear) and gate 3 (side match) are distinct. Gate 2 asks:
+         "would the replacement chord physically intersect the disc?" Gate 3 asks:
+         "is the replacement chord on the <em>same side</em> of the obstacle that the
+         rope was wound on?" The dangerous scenario above passes gate 2 (the chord
+         misses the disc) but fails gate 3 because the chord is on the opposite side.
+         Gate 3 compares the chord's <em><span class="term"
+           data-def="The 2D cross product of vectors A and B gives a scalar whose sign tells you whether B is to the left (+) or right (−) of A."
+           data-href="https://en.wikipedia.org/wiki/Cross_product">cross-product</span> side</em> (the sign of
+         <code>cross(next − prev, center − prev)</code>, positive if the obstacle
+         center is to the left of the chord, negative if to the right) against the
+         wrap's stored side and vetoes release when they disagree, which stops the
+         rope from teleporting across the disc in a single frame.</p>
+
+      <div class="key-insight">
+        Without the side check, a frame-by-frame debugger sees: gate 1 passes
+        (winding small), gate 2 passes (chord not clipping the disc). Everything
+        looks fine. But the rope just jumped across the obstacle to the wrong
+        side. Gate 3 is the only gate that catches this case, and it is cheap:
+        one cross product.
+      </div>
+
+      <p>With gate 3 disabled, the released chord (red) passes <em>below</em> the
+         disc. It clears the obstacle, but lands on the wrong side. The faint purple
+         arc is the correctly held wrap.</p>
+    </div>
+    <div class="fig">
+      <div class="demo-root" data-pose="teleport-bug" style="min-height:300px;"></div>
+    </div>
+  </section>
+
+  <!-- 4e · Solve: beyond circles (convex hulls) -->
+  <section id="s-solve-shapes" class="sec">
+    <div class="prose">
+      <h3>Beyond circles: hulls and boundary loops</h3>
+      <p>Every demo here draws obstacles as circles because a circle's tangent points
+         and arc length come out as clean formulas. Nothing in the architecture depends
+         on that shape. The same wrap machinery handles a <strong>convex hull</strong>:
+         the analytic tangent <em>point</em> becomes a <strong>support vertex</strong>
+         (occasionally a whole edge), and the circular contact arc becomes the chain of
+         hull edges the rope actually touches. The legs are still tangents; the topology
+         (which obstacle, which side, how far wound) is tracked exactly as before.</p>
+      <p>This is the same construction from <a href="#s-solve">§Solve</a>, with the circle swapped for a polygon.
+         The reusable solver in this repo stays circle-only on purpose (analytic and
+         readable); generalising the contact test to support vertices is the one piece a
+         fuller implementation adds.</p>
+    </div>
+    <div class="fig">
+      <div class="demo-root" data-pose="hull" style="min-height:300px;"></div>
+    </div>
+  </section>
+
+  <!-- 4f · Solve: boundary loops -->
+  <section id="s-solve-shapes-2" class="sec">
+    <div class="prose">
+      <h3>A boundary loop is the same wrap, inside-out</h3>
+      <p>A <strong>boundary loop</strong> is the rope routed around the <em>inside</em>
+         of an enclosing region, hugging the rim of a pit or a cleared area instead of
+         the outside of an obstacle. It uses the same winding bookkeeping with the
+         admissible side reversed: an inward corner of the boundary is, locally, just a
+         convex hull vertex seen from the other side. <em>Wrapping outside an obstacle</em>
+         and <em>wrapping inside a loop</em> are the same mechanism.</p>
+      <p>So circles, convex hulls, and simple boundary loops are a single collision
+         problem; the topology state (which side, how far wound) stays identical.</p>
+
+      <div class="tech-note">
+        <strong>Building the boundary.</strong> Rather than hand-authoring rim polygons,
+        derive a <strong>free-space boundary</strong> from the collision map: take the blocked cells,
+        <strong>dilate</strong> them by the rope radius, <strong>invert</strong> to get the
+        free region, and trace that region's outline into loops. The rope then wraps the
+        loop's <strong>reflex corners</strong> (the inward-pointing wall corners) with the
+        same tangent-and-arc machinery; the radius dilation is why the rope rides a
+        rope-width off the wall instead of clipping it. One honest caveat the code itself
+        flags: boundary <em>release</em> can string-pull to a shorter homotopy class, so
+        boundary topology is only <em>partially</em> conserved, unlike the exact
+        circle/hull release gates of <a href="#s-solve-release">§Solve</a>.
+      </div>
+    </div>
+    <div class="fig">
+      <div class="demo-root" data-pose="boundary" style="min-height:300px;"></div>
+    </div>
+  </section>
+
+  <!-- 5 · Simulate -->
+  <section id="s-simulate" class="sec sec-fix">
+    <div class="prose">
+      <h2>Simulate: the slack rope</h2>
+
+      <p>§Solve gives us the taut path: the shortest rope that respects the wraps.
+         But the rope is <em>material</em>: you pay out a finite length at the hand, and
+         that length doesn't vanish when the hand moves back. Retrace, and the taut path
+         shortens while the material is conserved, so the rope goes <strong>slack</strong>,
+         bowing out in the ground plane. The one number that governs everything here is
+         <strong>slack = deployed − taut</strong>. The rope is really <em>two</em> coupled
+         representations: the <strong>taut path</strong> from §Solve, which owns
+         <em>topology</em>, and a <strong>slack simulated rope</strong>, which owns
+         <em>shape</em>. This section builds the slack rope, then spends most of its length
+         on the part that turned out to be genuinely hard: keeping the two from disagreeing.</p>
+
+      <p>None of this is gravity. The slack is <em>geometric</em>: extra material with no
+         taut path to lie along. (A 3D game can add gravity as a separate vertical term to
+         give the slack a hanging <em>height</em>; but that only shapes a rope that is
+         <em>already</em> slack; it is never what creates the slack.)</p>
+    </div>
+  </section>
+
+  <!-- 5a · Simulate: building the slack rope -->
+  <section id="s-simulate-build" class="sec">
+    <div class="prose">
+      <p><strong><span class="term"
+           data-def="A numerical integration method that computes position from acceleration without storing velocity, giving stable oscillation in physics simulations."
+           data-href="https://en.wikipedia.org/wiki/Verlet_integration">Verlet integration</span></strong> carries the shape: store each
+         particle's <em>current</em> and <em>previous</em> position rather than an explicit
+         velocity, and extrapolate forward each step:</p>
+      <pre><code>new_pos = pos + (pos − prev_pos)</code></pre>
+      <p>It is numerically stable and needs no velocity bookkeeping: velocity falls out of
+         the positional difference. Crucially, the particles <em>remember</em> where the rope
+         has been: that memory is what lets the slack hold the shape it was deployed into,
+         instead of snapping onto the chord.</p>
+
+      <h3>One-sided distance links</h3>
+      <p>Adjacent particles are joined by <strong>one-sided distance links</strong>: if two
+         particles are pulled <em>further apart</em> than the rest length, the link pulls them
+         back together; if they drift <em>closer</em>, it does nothing. That asymmetry is what
+         makes a rope and not a rod: the chain can never stretch past its material length, but
+         it is free to bunch up and bow into slack. A few iterations of constraint relaxation
+         per frame keep the links satisfied.</p>
+
+      <p>So once the hand retraces, the deployed material is longer than the straight chord to
+         the player: the links can't pull it taut, and the leftover length bows out into the
+         slack curve in the figure.</p>
+
+      <h3>Redistributing the slack</h3>
+      <p>The one-sided links resist only stretch, so the rope is free to go slack, but they never
+         say <em>where</em> along the curve the surplus should sit, and a chain of one-sided links can
+         pile material unevenly wherever a link happened to give. A <strong>redistribution</strong>
+         pass can even this out: resample the chain to uniform arc-length along its own curve, sliding
+         particles tangentially so the shape is untouched but the spacing is regular. This in-plane
+         explainer runs without it. Resampling a flat 2D curve to uniform spacing pulls the bowed slack
+         back toward the straight taut path and flattens the loop, and the Bézier stroke evens the
+         spacing at render time anyway, so the demos keep the raw chain. The shape itself is pure
+         <em>memory</em>: the slack holds whatever curve the hand laid it in, bowing into an in-plane
+         loop where the hand moved off the straight line, because nothing pulls an in-class bead back
+         onto the taut path. Material is conserved either way: redistribution only slides particles
+         along the rope, it never adds or removes any.</p>
+    </div>
+    <div class="fig">
+      <div class="demo-root" data-pose="slack" style="min-height:300px;"></div>
+    </div>
+  </section>
+
+  <!-- 5b · Simulate: keeping the slack rope in the taut path's winding class -->
+  <section id="s-simulate-2" class="sec">
+    <div class="prose">
+      <h3>Keeping the slack rope in the taut path's winding class</h3>
+
+      <p>The naive rope never solved this: a slack particle sim can drift to the
+         <em>wrong side</em> of an obstacle the taut path wraps. When that happens the two
+         ropes disagree about topology, and the rope you draw is wrong: it cuts through a
+         trunk the taut path went around, or hangs on the wrong side of a wrap.</p>
+
+      <p>The naive fix ("snap any bead that's on the wrong side back") is exactly what
+         <a href="#s-naive">§Naive</a> showed flickering. A per-bead side test has no
+         memory and no global picture. Ask the global question instead:
+         <strong>is the slack rope in the same winding class as
+         the taut path?</strong></p>
+
+      <h3>loopK: the winding class</h3>
+      <p>Take the total signed turning of each rope about the obstacle's centre: the sum
+         of the angle each segment sweeps, CCW positive, CW negative. The slack rope's
+         turning minus the taut path's, over 2π and rounded, is an integer:</p>
+      <pre><code>loopK = round( ( winding(slack) − winding(taut) ) / 2π )</code></pre>
+      <p><code>loopK = 0</code> means the two ropes are in the same class: same laps,
+         same side. <code>loopK = ±1</code> means the slack rope has slipped one full loop
+         off the taut path. That single integer is the entire correctness test.</p>
+
+      <h3>Lobes and winding defects: <em>where</em> it slipped</h3>
+      <p><code>loopK</code> says the rope slipped; lobes say where. Find
+         where the slack rope <em>crosses</em> the taut path. Between two
+         consecutive crossings is a <strong>lobe</strong>: a closed loop of a slack arc
+         and the taut arc back. Each lobe carries its own integer <strong>winding
+         defect</strong>: the net turns <em>that lobe</em> makes around the obstacle. The
+         beads in a lobe whose defect is nonzero are the ones that slipped; they are pulled
+         back toward their material <span class="term"
+           data-def="Each slack bead remembers its arclength position along the deployed rope (its material coordinate M). Its 'bookmark' is the taut-path point at arclength U = M·min(1, taut/deployed). The correction pulls a wound bead toward its bookmark, so it returns along the rope instead of teleporting.">bookmark</span>
+         on the taut path.</p>
+
+      <h3>Bookmarks: pulling a bead home <em>along</em> the rope</h3>
+      <p>Which point should a slipped bead be pulled toward? Not the nearest point on the taut
+         path: that can sit on the far side of a trunk, and snapping there teleports the rope
+         across the obstacle. Each bead instead carries a <strong>bookmark</strong>: its own
+         <em>material coordinate</em> <code>M</code>, its arclength position along the deployed
+         rope (0 at the spool, the full deployed length at the hand). Its bookmark is the taut-path
+         point at arclength <code>U = M · min(1, taut/deployed)</code>: when the rope is slack the factor
+         <code>taut/deployed</code> packs the material evenly onto the shorter geodesic; when it's
+         taut the factor is 1 and <code>U = M</code>. Either way the bookmarks tile the taut path
+         in the same order the beads run along the rope, a frame-to-frame correspondence between
+         the slack rope and the geodesic.</p>
+
+      <p>Correcting a wound bead is a <strong>three-way</strong> decision. If the
+         bead sits <em>inside</em> an actionable trunk, it is first evicted straight out along its
+         chord to the rim, so it never tunnels through. Otherwise, if the chord to its bookmark (or
+         an adjacent rope segment) crosses an actionable trunk, it is pulled a bounded step toward
+         its bookmark; and if
+         neither holds, it is left alone. Because the bookmark is the <em>matching</em> material
+         point, a pulled bead returns <em>along the rope's own length</em>: it unwinds the way it
+         wound, rather than cutting across the trunk. The <a href="#s-synthesis">§Synthesis</a>
+         capstone draws these correspondences live: every line ties a slack bead to its bookmark on
+         the taut path, and when a lobe is out of class the lines turn red and reel it back in.</p>
+
+      <p>A lobe is acted on only when <code>Actionable(defect, loopK) = defect ≠ 0 AND
+         loopK ≠ 0</code>. Drag the rope under the trunk in the figure: the class flips to
+         <code>loopK = 1</code>, the lobe lights up with <code>defect +1</code>, and the
+         wound beads sprout pull-back arrows toward the geodesic. Drag it back over the top
+         and the class returns to <code>0</code>, nothing to correct. (This figure isolates the
+         <code>loopK</code> gate and the bookmark pull-back; the full three-way repair, including
+         the eviction of a bead caught inside a trunk, straight out along its chord to the rim,
+         runs in the slack-rope sim,
+         shown live in the <a href="#s-synthesis">§Synthesis</a> capstone.)</p>
+
+      <div class="key-insight">
+        <strong>The taut path owns topology; the slack rope is continuously corrected to
+        stay in its class.</strong> That is the real architecture, and the correction,
+        not the geometry, is the hard part. The §Solve tangent-and-arc is textbook; this
+        winding-class bookkeeping is where the real work went.
+      </div>
+    </div>
+    <div class="fig">
+      <div class="demo-root" data-pose="wrong-class" style="min-height:300px;"></div>
+    </div>
+  </section>
+
+  <!-- 5c · Simulate: tangency flicker + conservation -->
+  <section id="s-simulate-3" class="sec">
+    <div class="prose">
+      <h3>Why gate on loopK: tangency flicker</h3>
+
+      <p>The global <code>loopK ≠ 0</code> gate prevents tangency flicker. At
+         <em>grazing contact</em>, when the slack rope barely kisses an obstacle, it crosses
+         the taut path several times and splits into several lobes, and a per-lobe test
+         twitches every frame as those crossings appear and vanish. But the rope's global
+         winding class doesn't move: the slack is still the same class as the taut
+         (<code>loopK = 0</code>). Gating on <code>loopK ≠ 0</code> kills the flicker: if the
+         global class is zero, there is nothing to fix, whatever the lobes say. In the figure
+         the slack grazes the trunk and splits into several lobes, all in the same winding
+         class (<code>loopK = 0</code>), so not one bead is touched.</p>
+
+      <h3>The conservation check</h3>
+      <p>Lobe defects should sum to <code>loopK</code>.
+         In a clean diagram they do, exactly; it's how you know the lobe split is
+         consistent with the global class. In a real-time sim's noisier geometry it's a
+         <em>diagnostic</em> rather than a hard gate. One more wrinkle: once
+         a correction starts, a lobe's explicit crossings can vanish mid-pull while the
+         rope is still a lap off, so a <strong>bookmark-discrepancy fallback</strong> keeps
+         drawing those residual beads home until the class actually reads zero.</p>
+
+      <p>None of this lives in the textbook tangent-and-arc solver. It is the accumulated
+         scar tissue of making a slack, swinging rope agree with a taut geometric one,
+         frame after frame, without flicker.</p>
+    </div>
+    <div class="fig">
+      <div class="demo-root" data-pose="flicker" style="min-height:300px;"></div>
+    </div>
+  </section>
+
+  <!-- 6 · Stroke: dead-ends -->
+  <section id="s-stroke" class="sec sec-fix">
+    <div class="prose">
+      <h2>Stroke: drawing the rope</h2>
+
+      <p>Topology is fixed; the slack shape is simulated. Now draw a smooth, anti-aliased
+         rope, not a chain of circles or a raw polyline. Two natural approaches both fall short.</p>
+    </div>
+  </section>
+
+  <!-- 6a · Stroke dead end 1 -->
+  <section id="s-stroke-1" class="sec">
+    <div class="prose">
+      <h3>Dead end 1: decimate then globally fit</h3>
+      <p>First attempt: run
+         <strong><span class="term"
+           data-def="A polyline simplification algorithm that removes points within a tolerance distance of the simplified curve."
+           data-href="https://en.wikipedia.org/wiki/Ramer%E2%80%93Douglas%E2%80%93Peucker_algorithm">Douglas–Peucker</span> decimation</strong>
+         on the particle chain, then fit a global smoothing spline.</p>
+
+      <p>This breaks by <em>control-point starvation</em>. Straight legs dominate
+         the arc-length budget. The figures compare
+         a low control count (8) against a high one (64): almost all controls land on the
+         legs, leaving the tight wrap with one or two controls to describe a half-circle
+         whose chord deviates <strong>~300 mm</strong> from the true arc. Even at 64
+         controls the error is still <strong>~65 mm</strong>. The improvement is a 4.6×
+         factor that still isn't good enough.</p>
+
+      <p>A second problem compounds this: decimation's kept-set is unstable. Tiny
+         perturbations of the rope's particle positions flip which points survive the
+         threshold, causing the fit to <em>jump</em> discontinuously between frames.</p>
+
+      <div class="key-insight">
+        <strong>Measured corner-cut:</strong> 8 controls → 300 mm deviation at the
+        wrap; 64 controls → 65 mm, a 4.6× improvement that still isn't good enough.
+        The wrap is fundamentally under-served by a uniform arc-length budget.
+      </div>
+    </div>
+    <div class="fig">
+      <div class="demo-root" data-pose="low" style="min-height:280px;"></div>
+    </div>
+  </section>
+
+  <!-- 6b · Stroke: dead end 2 + the insight -->
+  <section id="s-stroke-2" class="sec">
+    <div class="prose">
+      <h3>Dead end 2: a polynomial spline cannot be a circular arc</h3>
+      <p>The second idea: fit the wrap region with a degree-2 polynomial spline.
+         This is a mathematical limit, not an engineering tradeoff.</p>
+
+      <p>A circular arc is a <strong>conic section</strong>; it cannot be
+         represented exactly by any polynomial of finite degree. A quadratic
+         polynomial matches the arc only at its endpoints and one other point;
+         between those, it deviates and oscillates. The more segments you add to
+         reduce the oscillation, the more control points you need, which reintroduces
+         the starvation problem from dead end 1, now at the segment seams instead of
+         the whole wrap.</p>
+
+      <h3>The solver already knows the arc parameters exactly</h3>
+      <p>Both dead ends assume the arc must be recovered from the particles. It need not
+         be: the solver already computed every wrap's exact parameters:
+         <code>(center, radius, a0, a1)</code>. That information is <em>still in
+         memory</em>, so instead of fitting a curve to noisy beads, we tessellate the
+         known arc directly. That trades an <em>unbounded</em> fitting error for a
+         <em>small, bounded</em> tessellation error (≈0.06%·r at 30° per Bézier, close,
+         not mathematically exact).</p>
+
+      <div class="key-insight">
+        <strong>Use solver arcs for contact; fit only free spans.</strong>
+        Arc spans come from the solver's circle parameters. Free spans come from the
+        simulated rope samples. Both become quadratic Béziers for the SDF renderer.
+      </div>
+
+      <p>Per frame:</p>
+      <ol>
+        <li><strong>Decompose</strong> the corrected sim polyline into arc spans and
+            free spans.</li>
+        <li><strong>Tessellate arcs</strong> from <code>(center, r, a0, a1)</code> into
+            quadratic Béziers. At 30° per segment, error is ≈0.06% of radius.</li>
+        <li><strong>Fit free spans</strong> from particle samples with centripetal
+            Catmull-Rom, converted to quadratics.</li>
+        <li><strong>Draw the stroke</strong> with a per-fragment SDF over the Bézier set.</li>
+      </ol>
+    </div>
+    <div class="fig">
+      <div class="demo-root" data-pose="high" style="min-height:280px;"></div>
+    </div>
+  </section>
+
+  <!-- 6c · Stroke: module pipeline -->
+  <section id="s-stroke-pipeline" class="sec">
+    <div class="prose">
+      <h3>The module split</h3>
+      <p>The stroke is built in three steps: <strong>decompose</strong> the rope into the
+         spans that hug a wrap (arcs) and the spans that don't (free), <strong>tessellate</strong>
+         each arc to quadratic Béziers, and <strong>fit</strong> each free span to a smooth
+         Bézier that joins the arc tangentially. Drag the slack handle: as a free leg flexes with
+         in-plane slack, it stays anchored to (and tangent with) the arc at the contact points.</p>
+    </div>
+    <div class="fig">
+      <div class="demo-root" style="min-height:300px;"></div>
+    </div>
+  </section>
+
+  <!-- 6d · Stroke: SDF demo -->
+  <section id="s-stroke-3" class="sec">
+    <div class="prose">
+      <h3>The SDF stroke in action</h3>
+      <p>A single quadratic Bézier rendered as an SDF stroke. Switch to the
+         <code>cpu</code> or <code>heatmap</code> pose (via the URL)
+         to see the Canvas 2D fallback and the distance-field colour ramp: bands of
+         colour varying smoothly outward from the stroke boundary are the verification
+         signal that the field is correct.</p>
+
+      <div class="key-insight">
+        <strong>Why SDF?</strong> A classic anti-aliased polyline must tessellate
+        the mesh to sub-pixel precision and spend triangles on every bend. The SDF
+        approach evaluates one analytic formula per fragment: no triangles at the
+        bends, and the anti-aliasing is exact by construction:
+        <code>alpha = 1 − smoothstep(r−1, r, d)</code> where <code>d</code> is
+        the exact distance and <code>r</code> is the stroke radius in pixels.
+        The only cost is the analytic distance function:
+        <span class="term"
+          data-def="Graphics researcher known for analytical SDF formulations and GPU rendering techniques."
+          data-href="https://iquilezles.org/articles/distfunctions2d/">Inigo Quilez</span>'s cubic
+        solver, which runs in under 50 instructions on modern GPUs.
+      </div>
+
+      <p><strong>Pixel coordinates:</strong> a 3D renderer's shaders avoid backend Y-flips by
+         passing a projected <code>v_px</code> varying. This demo works directly in
+         pixel space.</p>
+    </div>
+    <div class="fig">
+      <div class="demo-root" data-pose="default" style="min-height:300px;"></div>
+    </div>
+  </section>
+
+  <!-- 7 · Synthesis -->
+  <section id="s-synthesis" class="sec">
+    <div class="prose">
+      <h2>Synthesis</h2>
+
+      <p>One frame: solve, simulate, stroke.</p>
+
+      <h3>Frame pipeline</h3>
+
+      <figure class="pipeline-diagram">
+        <div class="pipe-row">
+          <div class="pipe-box pipe-solve">
+            <strong>Solve</strong>
+            <span>winding tracker<br>taut-path builder<br>release gates</span>
+          </div>
+          <div class="pipe-arrow" aria-hidden="true">↓</div>
+          <div class="pipe-box pipe-sim">
+            <strong>Simulate</strong>
+            <span>slack rope (Verlet/PBD chain)<br>material conservation + lock<br>bookmarks · lobes · loopK</span>
+          </div>
+          <div class="pipe-arrow" aria-hidden="true">↓</div>
+          <div class="pipe-box pipe-stroke">
+            <strong>Stroke</strong>
+            <span>arc tessellation<br>free-span fit<br>SDF Bézier render</span>
+          </div>
+        </div>
+        <figcaption>Solver owns topology; sim adds shape; stroke draws the curve.</figcaption>
+      </figure>
+
+      <h3>2D vs 3D</h3>
+      <p>The topology problem is planar. The solver works in the <em>ground plane</em>
+         (the two horizontal axes): obstacle containment, winding, tangent choice, wrap
+         insertion, release, boundary loops, and <code>loopK</code> all ignore height.
+         That is the key to keeping it tractable: topology is a 2D question.</p>
+
+      <p>The slack rope and renderer are spatial. Each bead carries its two ground-plane
+         coordinates for topology plus a height coordinate for ground contact and camera-facing
+         stroke data. Topology checks project beads back to the ground plane; rendering uses the
+         full position. Crucially, the slack rope's shape is a <em>geometric</em> construct: it is
+         the <strong>deployed material</strong> (a running max of rope paid out) relaxed against
+         the shortened taut path, so the surplus bows out in-plane (<code>slack = deployed −
+         taut</code>). It is geometry, not a time-based settle or a drag trail, resting on the same
+         conserved-material pillar the winding-class correction follows. (In 3D, gravity additionally settles the
+         already-slack rope into a vertical height; it is not what creates the slack.)</p>
+
+      <p>The <strong>capstone below</strong> is the 2D top-down view: drag the player to wind the
+         trunks, then drag back; the paid-out material (a running max) now exceeds the shortened
+         taut path, so real in-plane slack bows out as a loop. The purple ribbon strokes the
+         <em>slack rope itself</em>; the toggles reveal the taut geodesic it rides, the raw particle
+         chain, and each bead's bookmark (its material point on the taut path). The
+         <a href="#s-synopsis">3/4 view up top</a> is the same planar solve rendered through an
+         oblique camera (three trunks, the hero arrangement); the projection is the only 3D part.</p>
+
+      <h3>Game-loop recipe</h3>
+      <p>Frame order:</p>
+      <pre><code>// path-solver.js: authoritative topology + taut path
+solver.update(playerPos, obstacles)
+
+// the taut polyline, [{x,y}], guaranteed outside all obstacles
+const taut = solver.nodes
+
+// clamp the player / show a "taut" warning when len &gt;= paidOut
+const len = solver.tautLength
+
+// The slack rope's SHAPE is your sim's job. It is MATERIAL, not a drag trail:
+//   PAYOUT: pay out rope at the hand. New material inserts just behind the hand; existing beads
+//     keep their material coordinate M (never re-indexed). deployed length is a running max.
+//   LOCK:   a Verlet/PBD chain conserves that material; a bead LOCKS onto the taut path once its
+//     chord error to the geodesic is below eps AND its links are at rest (unlocking on a stretch
+//     or a chord jump). Locked beads ARE the taut path; only the slack ones bow.
+//   Retracing shortens taut while material is conserved, so the surplus bows out in-plane as slack.
+//   (In 3D, gravity only settles the already-slack rope into a vertical height, not the source.)
+const sim = updateSlackShape(playerPos, taut, solver.wraps)
+// keep it in the taut WINDING CLASS: each bead's bookmark is the taut-path point at U = M*min(1, taut/deployed);
+// repair an out-of-class bead by a 3-way rule (evict along its chord if inside an actionable trunk;
+// else pull to its bookmark if the chord-to-bookmark OR an adjacent segment crosses one; else skip).
+keepInWindingClass(sim, taut, obstacles)
+
+// rope-stroke.js: turn the rope into render-ready quadratic Béziers:
+// slackStroke decomposes the SIM rope (primitive-decompose) into arc spans
+// (arc-tessellate) + free spans (free-span-fit); tautStroke builds straight
+// from the solver wraps when the rope is in its taut class.
+const beziers = slackStroke(sim, solver.wraps, { circles: obstacles })
+
+// bezier-sdf.glsl: one SDF pass over the packed Bézier set
+drawSdfStroke(beziers)</code></pre>
+
+      <h3>Function map</h3>
+      <p>Concept to code:</p>
+      <dl class="build-map">
+        <dt><a href="src/vec2.js">vec2.js</a></dt>
+        <dd>2D vector primitives (<code>add</code>, <code>sub</code>, <code>dot</code>,
+            <code>cross</code>, <code>len</code>, <code>norm</code>,
+            <code>fromAngle</code>, <code>angle</code>).</dd>
+
+        <dt><a href="src/verlet.js">verlet.js</a></dt>
+        <dd><code>createRope</code>, <code>step</code>, <code>pinEnd</code>: the
+            Verlet integration loop with one-sided distance constraints (an optional gravity
+            term, off in this in-plane explainer). Owns the shape layer; knows nothing about
+            topology or obstacles.</dd>
+
+        <dt><a href="src/path-solver.js">path-solver.js</a></dt>
+        <dd><code>PathSolver</code>: the topology engine. Feed it a spool position,
+            call <code>.update(playerPos, obstacles)</code> each frame, read
+            <code>.nodes</code> for the taut polyline and <code>.tautLength</code>
+            for the leash length (exact through ~one turn). Internally: endpoint substeps, deterministic
+            wrap-side insertion from the crossing, accumulated signed contact span,
+            zero-gap tangent/arc parametrisation, topology rebase after edits, and all
+            three release gates (unwound, chord-clear, anti-teleport side check).</dd>
+
+        <dt><a href="src/slack-topology.js">slack-topology.js</a><br>
+            <a href="src/slack-correction.js">slack-correction.js</a></dt>
+        <dd>The winding-class correction from <a href="#s-simulate">§Simulate</a>.
+            <code>slack-topology.js</code> computes <code>loopK</code>, slack↔taut
+            crossings, lobe defects, and the <code>defect≠0 && loopK≠0</code> gate.
+            <code>slack-correction.js</code> adds the explainer-scale glue: material
+            bookmarks, bookmark-discrepancy fallback, bounded pull-back, and obstacle
+            projection, driving the §Simulate lobe-defect demo. (The capstones run their
+            winding-class correction inside the slack-rope sim itself.)</dd>
+
+        <dt><a href="src/primitive-decompose.js">primitive-decompose.js</a></dt>
+        <dd><code>decompose(points, wraps)</code>: classifies a corrected sim polyline into
+            arc spans (sections near a wrap's contact arc) and free spans (the slack
+            legs between wraps), returning a list of <code>{kind, start, end, arc?}</code>
+            primitives. The bridge between the solver's wrap data and the tessellation
+            / fitting stage. (Each wrap exposes its <code>entry</code>/<code>exit</code>
+            tangent points and signed <code>span</code>; derive the contact-arc start
+            angle as <code>atan2(entry − center)</code> wherever a tessellator wants an
+            angle rather than a point.)</dd>
+
+        <dt><a href="src/arc-tessellate.js">arc-tessellate.js</a></dt>
+        <dd><code>tessellateArc({center, radius, a0, a1})</code>: converts an
+            exact circular arc into a sequence of quadratic Bézier segments. Each
+            segment's control point is derived from the arc's mid-angle so the
+            approximation error is &lt; 0.1% of the radius regardless of how many
+            segments are used.</dd>
+
+        <dt><a href="src/free-span-fit.js">free-span-fit.js</a></dt>
+        <dd><code>fitFreeSpan(points)</code>: fits a sequence of particle positions
+            with centripetal Catmull-Rom, converting each span to a quadratic Bézier.
+            Includes an obstacle-avoidance fallback: if any Bézier in the span would push
+            the curve inside a circle, the whole span degrades to straight chords (so a
+            smooth curve never abuts a straight one at a kink).</dd>
+
+        <dt><a href="src/bezier-sdf.js">bezier-sdf.js</a><br>
+            <a href="src/bezier-sdf.glsl">bezier-sdf.glsl</a></dt>
+        <dd>CPU and GPU implementations of <span class="term"
+              data-def="Graphics researcher known for analytical SDF formulations and GPU rendering techniques."
+              data-href="https://iquilezles.org/articles/distfunctions2d/">Inigo Quilez</span>'s exact quadratic-Bézier
+            signed distance function. Feed it a fragment position and three control
+            points; get distance to the curve. The GPU path evaluates one Bézier
+            or the nearest of a packed Bézier set, no rope mesh, just SDF
+            anti-aliasing.</dd>
+
+        <dt><a href="src/rope-stroke.js">rope-stroke.js</a></dt>
+        <dd><code>tautStroke({anchor, wraps, endpoint})</code> builds the render-ready
+            quadratic Béziers straight from the solved taut path: each wrap arc consumed
+            with its signed span, so a wrap past a half-turn arcs the correct way and lands on
+            its exit tangent (the multi-lap span is the nearest-lap reconciliation, exact
+            through ~one turn). <code>slackStroke(points, wraps)</code> does the same for a
+            corrected slack rope (decompose → wrap arcs + fitted free spans);
+            the two coincide when the slack rope is in its taut winding class.</dd>
+
+        <dt><a href="src/camera-ortho.js">camera-ortho.js</a></dt>
+        <dd><code>makeGroundCamera(...)</code>, the 3/4 capstone's only 3D piece: an
+            invertible oblique-orthographic projection of the ground plane (depth
+            foreshortened, obstacles raised into vertical poles). Topology is solved in the
+            ground plane; this just projects the result and unprojects screen drags.</dd>
+
+        <dt><a href="src/rope-sim.js">rope-sim.js</a></dt>
+        <dd>The slack-rope sim shared by both capstones as the Simulate stage. A Verlet/PBD chain:
+            one-sided links (resist stretch, allow bunching), material paid out at the hand,
+            lock-to-taut, and the winding-class correction (a bead inside a trunk is evicted along
+            its chord to the rim). Its published <code>points</code> are the slack rope the stroke
+            draws, not a drag trail. Deployed length is a running max, so retracing the player
+            produces real in-plane slack (<code>slack = deployed − taut</code>).</dd>
+
+        <dt><a href="src/player-paths.js">player-paths.js</a></dt>
+        <dd><code>densify</code>, <code>arcWaypoints</code>, <code>retrace</code>: distance-sampled
+            (frame-rate-independent) recorded player drags. The capstones replay these to seed a
+            pose, and the tests drive them to assert emergent behaviour rather than placed states.</dd>
+      </dl>
+
+      <h3>Extending it</h3>
+      <p>Extensions:</p>
+      <ul>
+        <li><strong>Production-scale correction.</strong> The capstone includes the core
+            lobe/defect/<code>loopK</code> correction. A full real-time implementation adds the
+            same engineering around it: broad-phase crossing scans, fixed scratch buffers,
+            contact-pole dispatch, and persistent residual bookmark correction while a wound
+            lobe is collapsing back onto the taut path.</li>
+        <li><strong>Non-circular obstacles.</strong> Convex hulls and boundary loops
+            (<a href="#s-solve-shapes">Beyond circles</a>): the same wrap machinery handles a
+            hull (the tangent contact becomes a support vertex) and a free-space boundary (the
+            same wrap, inside-out, around reflex corners). The contact geometry changes; the
+            topology state does not.</li>
+        <li><strong>Drawing multiple laps.</strong> The winding is already a single
+            <em>accumulated span</em> that grows past a revolution, so multi-lap is
+            <em>tracked</em> for free, and the arc renderer here already <em>draws</em> the
+            extra revolutions (<code>reconciledSpan</code> is lap-aware). What a fuller renderer
+            adds is making that exact past one turn (instead of round-to-nearest-lap) and
+            de-overlapping the stacked coil arcs.</li>
+      </ul>
+
+      <div class="key-insight">
+        Topology is explicit state, not inferred particle geometry. That keeps the
+        handoff clean: solver publishes wraps/contacts, sim corrects against them,
+        renderer consumes the same primitives.
+      </div>
+
+    </div>
+    <div class="fig">
+      <!-- capstone.js injects a toggle row + 760×480 canvas + note into this root -->
+      <div class="demo-root" style="min-height:320px;"></div>
+      <div class="fig-note capstone-note">
+        Expand to interact: drag the player to wind through the trunks, then drag back; the
+        deployed material now exceeds the taut path, so slack bows out. The toggles reveal the
+        <strong>taut path</strong> the rope rides, the raw <strong>particle</strong> chain, and each
+        bead's <strong>correspondence</strong> to its bookmark on the taut path (and
+        <strong>stroke</strong> hides the ribbon). The winding-class correction runs continuously:
+        when a bead slips out of class its correspondence line turns red and reels it back.
+      </div>
+    </div>
+  </section>
+
+  <footer class="page-foot">
+    <p>Source, tests, and reusable modules:
+       <a href="https://github.com/nightmailworks/dynamic-rope" target="_blank" rel="noopener">github.com/nightmailworks/dynamic-rope</a></p>
+  </footer>
+
+</main>
+
+<!-- ── Page script ──────────────────────────────────────────────────────── -->
+<script type="module">
+  import { registerSection } from './js/page.js';
+  import { mount as mountNaive }        from './src/demos/naive.js';
+  import { mount as mountWinding }      from './src/demos/winding.js';
+  import { mount as mountTautLength }   from './src/demos/taut-length.js';
+  import { mount as mountRelease }      from './src/demos/release.js';
+  import { mount as mountHulls }        from './src/demos/hulls.js';
+  import { mount as mountSimulate }     from './src/demos/simulate.js';
+  import { mount as mountLobe }         from './src/demos/lobe-defect.js';
+  import { mount as mountBadfit }       from './src/demos/badfit.js';
+  import { mount as mountStrokePipeline } from './src/demos/stroke-pipeline.js';
+  import { mount as mountSdf }          from './src/demos/sdf.js';
+  import { mount as mountPipelineOrtho } from './src/demos/pipeline-ortho.js';
+  import { mount as mountCapstone }      from './src/demos/capstone.js';
+
+  // Each wrapper forwards opts (notably `mode: 'compact'|'full'` from page.js) and
+  // sets the pose from the .demo-root's data-pose. Spread opts FIRST, then pose.
+  // Synopsis: the interactive 3/4 orthographic capstone (the hero view; drag player/trees, live solve)
+  registerSection('s-synopsis', (root, opts) => mountPipelineOrtho(root, { ...opts }));
+
+  // Naive failures (three sub-sections; each .demo-root carries data-pose). s-naive is the full-width opener.
+  registerSection('s-naive-1', (root, opts) => mountNaive(root, { ...opts, pose: root.dataset.pose ?? 'jitter' }));
+  registerSection('s-naive-2', (root, opts) => mountNaive(root, { ...opts, pose: root.dataset.pose ?? 'side-flip' }));
+  registerSection('s-naive-3', (root, opts) => mountNaive(root, { ...opts, pose: root.dataset.pose ?? 'laps' }));
+
+  // Winding section: full-width opener (s-winding) + three sub-sections, each .demo-root carries data-pose
+  registerSection('s-winding-def', (root, opts) => mountWinding(root, { ...opts, pose: root.dataset.pose ?? 'half' }));
+  registerSection('s-winding-2', (root, opts) => mountWinding(root, { ...opts, pose: root.dataset.pose ?? 'full' }));
+  registerSection('s-winding-3', (root, opts) => mountWinding(root, { ...opts, pose: root.dataset.pose ?? 'chord-falsepos' }));
+
+  // Solve section: taut-length demo (pose: wrapped by default)
+  registerSection('s-solve-build', (root, opts) => mountTautLength(root, { ...opts, pose: 'wrapped' }));
+
+  // Solve, release gates: full-width opener (s-solve-release) + three sub-sections, each carries data-pose
+  registerSection('s-solve-release-1', (root, opts) => mountRelease(root, { ...opts, pose: root.dataset.pose ?? 'held' }));
+  registerSection('s-solve-release-2', (root, opts) => mountRelease(root, { ...opts, pose: root.dataset.pose ?? 'released-clean' }));
+  registerSection('s-solve-release-3', (root, opts) => mountRelease(root, { ...opts, pose: root.dataset.pose ?? 'teleport-bug' }));
+
+  // Solve, beyond circles: convex hulls + boundary loops (static illustrations)
+  registerSection('s-solve-shapes',   (root, opts) => mountHulls(root, { ...opts, pose: root.dataset.pose ?? 'hull' }));
+  registerSection('s-solve-shapes-2', (root, opts) => mountHulls(root, { ...opts, pose: root.dataset.pose ?? 'boundary' }));
+
+  // Simulate section: in-plane slack rope (s-simulate) + the winding-class correction
+  // (s-simulate-2 wrong-class, s-simulate-3 flicker) via slack-topology.js.
+  registerSection('s-simulate-build', (root, opts) => mountSimulate(root, { ...opts, pose: root.dataset.pose ?? 'slack' }));
+  registerSection('s-simulate-2', (root, opts) => mountLobe(root,     { ...opts, pose: root.dataset.pose ?? 'wrong-class' }));
+  registerSection('s-simulate-3', (root, opts) => mountLobe(root,     { ...opts, pose: root.dataset.pose ?? 'flicker' }));
+
+  // Stroke section: badfit dead-end (s-stroke / s-stroke-2) + SDF demo (s-stroke-3)
+  registerSection('s-stroke-1', (root, opts) => mountBadfit(root, { ...opts, pose: root.dataset.pose ?? 'low' }));
+  registerSection('s-stroke-2', (root, opts) => mountBadfit(root, { ...opts, pose: root.dataset.pose ?? 'high' }));
+  registerSection('s-stroke-pipeline', (root, opts) => mountStrokePipeline(root, { ...opts }));
+  registerSection('s-stroke-3', (root, opts) => mountSdf(root,    { ...opts, pose: root.dataset.pose ?? 'default' }));
+
+  // Synthesis: full pipeline capstone (spool + player + trees, solve→sim→stroke).
+  registerSection('s-synthesis', (root, opts) => mountCapstone(root, { ...opts, pose: 'default' }));
+</script>
+<script src="js/glossary.js"></script>
+</body>
+</html>

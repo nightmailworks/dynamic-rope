@@ -1,0 +1,11 @@
+{
+  "name": "dynamic-rope",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Interactive explainer: a wrapping, topologically stable, SDF-rendered rope.",
+  "scripts": {
+    "test": "node --test"
+  },
+  "license": "MIT"
+}
