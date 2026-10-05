@@ -146,7 +146,16 @@ export function mount(root, { pose = 'wrong-class', mode = 'full' } = {}) {
 
     // Readouts
     const lkColor = wrong ? C.warn : C.ok;
-    label(ctx, `winding class  loopK = ${A.loopK}`, cssW / 2, compact ? 16 : 20, lkColor, compact ? 11 : 13, 'center');
+    const hdr = `winding class  loopK = ${A.loopK}`;
+    let hx = cssW / 2;
+    if (compact) {
+      // page.js pins an "interactive" badge in the top-left of compact figures (right edge ≈ 101 css
+      // px). Centre the header, but never under the badge: at phone widths (348 px canvas) the centred
+      // text began at x ≈ 94 and the badge hid its first glyph. Desktop widths are unaffected.
+      ctx.save(); ctx.font = '11px ui-monospace,Menlo,Consolas,monospace';
+      hx = Math.max(hx, 106 + ctx.measureText(hdr).width / 2); ctx.restore();
+    }
+    label(ctx, hdr, hx, compact ? 16 : 20, lkColor, compact ? 11 : 13, 'center');
     if (!compact) {
       // defect of the actionable lobe (if any)
       const d = act.length ? act[0].defect : 0;
