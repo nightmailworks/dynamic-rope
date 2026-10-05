@@ -393,7 +393,7 @@ function drawSceneCompact(canvas, { hand, spoolPaid, toScreen, sc, cssW, cssH })
     ctx.fill();
   }
 
-  // Compact leash bar (bottom-left) + "taut = N" (bottom-right), both clear of the top chip.
+  // Compact leash bar (bottom-left) + "taut = N" (bottom-right, left of the page's ⤢ expand box).
   drawLeashBarCompact(ctx, W, H, total, spoolPaid);
 
   const tripped = total >= spoolPaid * 0.9999;
@@ -401,7 +401,7 @@ function drawSceneCompact(canvas, { hand, spoolPaid, toScreen, sc, cssW, cssH })
   ctx.font = '11px monospace';
   ctx.textAlign = 'right';
   ctx.textBaseline = 'bottom';
-  ctx.fillText(`taut = ${total.toFixed(2)}`, W - 8, H - 6);
+  ctx.fillText(`taut = ${total.toFixed(2)}`, W - 40, H - 6);
 }
 
 // ── Public mount API ──────────────────────────────────────────────────────────
