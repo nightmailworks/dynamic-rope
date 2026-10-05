@@ -62,7 +62,36 @@ function fit(cw, ch) { const s = Math.min(cw / W, ch / H); return { s, ox: (cw -
 export function mount(root, { pose = 'default', mode = 'full' } = {}) {
   const compact = mode === 'compact';
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
-  const cssW = root.clientWidth || W, cssH = root.clientHeight || H;
+  // ── debug toggles + note (full mode only) ──
+  let showStroke = true, showTaut = true, showParticles = true, showBookmarks = true;
+  const btns = {};
+  let controls = null, note = null;
+  if (!compact) {
+    controls = document.createElement('div');
+    Object.assign(controls.style, { display: 'flex', gap: '6px', justifyContent: 'center', flexWrap: 'wrap', padding: '6px 0 4px', userSelect: 'none' });
+    const mk = (key, label, on) => {
+      const b = document.createElement('button'); b.textContent = label;
+      Object.assign(b.style, { font: '11px ui-monospace,Menlo,monospace', padding: '4px 10px', border: '1.5px solid', borderRadius: '5px', cursor: 'pointer' });
+      const style = v => Object.assign(b.style, { background: v ? '#996EFF22' : '#161b22', borderColor: v ? '#996EFF' : '#8b949e', color: v ? '#996EFF' : '#8b949e' });
+      style(on); b._style = style; btns[key] = b; controls.appendChild(b); return b;
+    };
+    mk('stroke', '◉ Stroke', showStroke);
+    mk('taut', '┄ Taut path', showTaut);
+    mk('particles', '• Particles', showParticles);
+    mk('book', '⇲ Correspondences', showBookmarks);
+    root.appendChild(controls);
+  }
+
+  if (!compact) {
+    note = document.createElement('p');
+    Object.assign(note.style, { textAlign: 'center', color: C.fg2, font: '11px ui-monospace,Menlo,monospace', margin: '6px 0 0' });
+    note.textContent = 'drag the player out and back to leave slack · drag a trunk · the purple ribbon strokes the slack rope';
+    root.appendChild(note);
+  }
+  // Toggles + note share the (overflow:hidden) root with the canvas stack, so the stack gets the
+  // height that is left over; sizing it to the whole root clipped its bottom and hid the note.
+  const chromeH = controls ? note.getBoundingClientRect().bottom - controls.getBoundingClientRect().top : 0;
+  const cssW = root.clientWidth || W, cssH = Math.max(100, (root.clientHeight || H) - chromeH);
   const PW = Math.round(cssW * dpr), PH = Math.round(cssH * dpr);
   const f = fit(cssW, cssH);
   const toScr = p => ({ x: f.ox + p.x * f.s, y: f.oy + p.y * f.s });
@@ -163,38 +192,11 @@ export function mount(root, { pose = 'default', mode = 'full' } = {}) {
     return best;
   }
 
-  // ── debug toggles + note (full mode only) ──
-  let showStroke = true, showTaut = true, showParticles = true, showBookmarks = true;
-  const btns = {};
-  let controls = null, note = null;
-  if (!compact) {
-    controls = document.createElement('div');
-    Object.assign(controls.style, { display: 'flex', gap: '6px', justifyContent: 'center', flexWrap: 'wrap', padding: '6px 0 4px', userSelect: 'none' });
-    const mk = (key, label, on) => {
-      const b = document.createElement('button'); b.textContent = label;
-      Object.assign(b.style, { font: '11px ui-monospace,Menlo,monospace', padding: '4px 10px', border: '1.5px solid', borderRadius: '5px', cursor: 'pointer' });
-      const style = v => Object.assign(b.style, { background: v ? '#996EFF22' : '#161b22', borderColor: v ? '#996EFF' : '#8b949e', color: v ? '#996EFF' : '#8b949e' });
-      style(on); b._style = style; btns[key] = b; controls.appendChild(b); return b;
-    };
-    mk('stroke', '◉ Stroke', showStroke);
-    mk('taut', '┄ Taut path', showTaut);
-    mk('particles', '• Particles', showParticles);
-    mk('book', '⇲ Correspondences', showBookmarks);
-    root.appendChild(controls);
-  }
-
   const stack = document.createElement('div');
   Object.assign(stack.style, { position: 'relative', width: `${cssW}px`, height: `${cssH}px`, background: C.bg });
-  root.appendChild(stack);
+  root.insertBefore(stack, note);   // between the toggles row and the note (note is null in compact mode)
   const mkC = ptr => { const c = document.createElement('canvas'); c.width = PW; c.height = PH; c.style.cssText = `width:${cssW}px;height:${cssH}px;position:absolute;inset:0;display:block` + (ptr ? '' : ';pointer-events:none'); stack.appendChild(c); return c; };
   const glC = mkC(true), ovC = mkC(false);
-
-  if (!compact) {
-    note = document.createElement('p');
-    Object.assign(note.style, { textAlign: 'center', color: C.fg2, font: '11px ui-monospace,Menlo,monospace', margin: '6px 0 0' });
-    note.textContent = 'drag the player out and back to leave slack · drag a trunk · the purple ribbon strokes the slack rope';
-    root.appendChild(note);
-  }
 
   // ── interaction (real hand-injection: dragging drives the solver + sim) ──
   let dragging = null, destroyed = false, raf = null, gl = null, prog = null, quad = null;

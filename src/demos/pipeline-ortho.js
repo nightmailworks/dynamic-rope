@@ -137,7 +137,44 @@ export function mount(root, { pose = 'default', mode = 'full' } = {}) {
   const compact = mode === 'compact';
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
   const cssW = root.clientWidth  || 760;
-  const cssH = root.clientHeight || 480;
+  // ── debug toggles + hint (full mode only) ──
+  // Stroke = the SDF rope ribbon. Taut = the solver geodesic the rope rides (dashed).
+  // Particles = the raw slack chain (dots). Correspondences = each bead's line to its
+  // material point (its bookmark) on the taut path (red when out of class).
+  let showStroke = true, showTaut = pose === 'slack', showParticles = false, showBookmarks = false;
+  const btns = {};
+  let controlsRow = null, hintRow = null;
+  if (!compact) {
+    controlsRow = document.createElement('div');
+    Object.assign(controlsRow.style, { display: 'flex', gap: '6px', justifyContent: 'center',
+      flexWrap: 'wrap', padding: '6px 0 2px', userSelect: 'none' });
+    const mk = (key, label, on) => {
+      const b = document.createElement('button'); b.textContent = label;
+      Object.assign(b.style, { font: '11px ui-monospace,Menlo,monospace', padding: '4px 10px',
+        border: '1.5px solid', borderRadius: '5px', cursor: 'pointer' });
+      const style = v => Object.assign(b.style, { background: v ? '#996EFF22' : '#161b22',
+        borderColor: v ? '#996EFF' : '#8b949e', color: v ? '#996EFF' : '#8b949e' });
+      style(on); b._style = style; btns[key] = b; controlsRow.appendChild(b); return b;
+    };
+    mk('stroke', '◉ Stroke', showStroke);
+    mk('taut', '┄ Taut path', showTaut);
+    mk('particles', '• Particles', showParticles);
+    mk('bookmarks', '⇲ Correspondences', showBookmarks);
+    root.appendChild(controlsRow);   // the canvas stack is appended below them
+
+    hintRow = document.createElement('div');
+    Object.assign(hintRow.style, { display: 'flex', justifyContent: 'center',
+      padding: '0 0 4px', font: '11px ui-monospace,Menlo,monospace', color: C.fg2 });
+    const hint = document.createElement('span');
+    hint.textContent = 'drag the player out and back to leave slack · drag a trunk · wind one past a full lap to coil';
+    hintRow.append(hint);
+    root.appendChild(hintRow);
+  }
+
+  // The rows above share the (overflow:hidden) root with the canvas stack, so the stack gets the
+  // height that is left over; sizing it to the whole root clipped its bottom by the rows' height.
+  const chromeH = controlsRow ? hintRow.getBoundingClientRect().bottom - controlsRow.getBoundingClientRect().top : 0;
+  const cssH = Math.max(100, (root.clientHeight || 480) - chromeH);
   const PW = Math.round(cssW * dpr), PH = Math.round(cssH * dpr);
 
   // mutable ground-space scene
@@ -243,40 +280,6 @@ export function mount(root, { pose = 'default', mode = 'full' } = {}) {
   const bg = mkCanvas(false);          // ground (static)
   const glCanvas = mkCanvas(true);     // rope SDF
   const ov = mkCanvas(false);          // trunks + handles (occlude the rope)
-
-  // ── debug toggles + hint (full mode only) ──
-  // Stroke = the SDF rope ribbon. Taut = the solver geodesic the rope rides (dashed).
-  // Particles = the raw slack chain (dots). Correspondences = each bead's line to its
-  // material point (its bookmark) on the taut path (red when out of class).
-  let showStroke = true, showTaut = pose === 'slack', showParticles = false, showBookmarks = false;
-  const btns = {};
-  let controlsRow = null, hintRow = null;
-  if (!compact) {
-    controlsRow = document.createElement('div');
-    Object.assign(controlsRow.style, { display: 'flex', gap: '6px', justifyContent: 'center',
-      flexWrap: 'wrap', padding: '6px 0 2px', userSelect: 'none' });
-    const mk = (key, label, on) => {
-      const b = document.createElement('button'); b.textContent = label;
-      Object.assign(b.style, { font: '11px ui-monospace,Menlo,monospace', padding: '4px 10px',
-        border: '1.5px solid', borderRadius: '5px', cursor: 'pointer' });
-      const style = v => Object.assign(b.style, { background: v ? '#996EFF22' : '#161b22',
-        borderColor: v ? '#996EFF' : '#8b949e', color: v ? '#996EFF' : '#8b949e' });
-      style(on); b._style = style; btns[key] = b; controlsRow.appendChild(b); return b;
-    };
-    mk('stroke', '◉ Stroke', showStroke);
-    mk('taut', '┄ Taut path', showTaut);
-    mk('particles', '• Particles', showParticles);
-    mk('bookmarks', '⇲ Correspondences', showBookmarks);
-    root.insertBefore(controlsRow, stack);
-
-    hintRow = document.createElement('div');
-    Object.assign(hintRow.style, { display: 'flex', justifyContent: 'center',
-      padding: '0 0 4px', font: '11px ui-monospace,Menlo,monospace', color: C.fg2 });
-    const hint = document.createElement('span');
-    hint.textContent = 'drag the player out and back to leave slack · drag a trunk · wind one past a full lap to coil';
-    hintRow.append(hint);
-    root.insertBefore(hintRow, stack);
-  }
 
   let destroyed = false, rafId = null, gl = null, prog = null, quad = null;
   let dragging = null;
